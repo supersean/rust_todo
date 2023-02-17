@@ -1,131 +1,86 @@
-use std::io::stdin;
-
-use db::models::Todo;
-use diesel::PgConnection;
-
+pub mod console;
 pub mod db;
+pub mod errors;
 pub mod warehouse;
+pub mod webapp;
+use actix_cors::Cors;
+use actix_web::http::header::ContentType;
+use actix_web::{http, HttpResponse};
+use actix_web::{middleware::Logger, web, App, HttpServer};
+use db::establish_connection;
+use diesel::PgConnection;
+use env_logger::Env;
+use errors::ServerError;
+use serde::Serialize;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
+use webapp::controllers::todo_controller;
 
-fn main() {
-    let conn = &mut db::establish_connection();
-    loop {
-        do_action(conn);
+// fn main() {
+//     let conn = &mut db::establish_connection();
+//     loop {
+//         console::do_action(conn);
+//     }
+// }
+
+pub struct DbConnectionError {}
+
+pub struct AppState {
+    conn: Mutex<PgConnection>,
+}
+impl AppState {
+    pub fn retrieve_conn(
+        &self,
+    ) -> Result<MutexGuard<PgConnection>, ServerError> {
+        Ok(self.conn.lock().or_else(|_| {
+            return Err(ServerError::SeanError {});
+        })?)
     }
 }
 
-pub struct Action {
-    key: String,
-    text: String,
-    action: fn(&mut PgConnection),
+pub fn ok_response<T>(body: &T) -> Result<HttpResponse, ServerError>
+where
+    T: Serialize,
+{
+    Ok(HttpResponse::Ok()
+        .content_type(ContentType::json())
+        .body(serialize_object(body)?))
 }
-impl Action {
-    fn do_action(&self, conn: &mut PgConnection) {
-        (self.action)(conn)
-    }
+fn serialize_object<T>(object: &T) -> Result<String, ServerError>
+where
+    T: Serialize,
+{
+    Ok(serde_json::to_string(object)?)
 }
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    let conn = establish_connection();
+    let app_state = web::Data::new(AppState {
+        conn: Mutex::new(conn),
+    });
 
-fn do_action(conn: &mut PgConnection) {
-    let insert_action = Action {
-        key: String::from("i"),
-        text: String::from("insert"),
-        action: add_todo,
-    };
-    let get_action = Action {
-        key: String::from("g"),
-        text: String::from("get"),
-        action: print_todos,
-    };
-    let complete_action = Action {
-        key: "c".to_string(),
-        text: "complete todo".to_string(),
-        action: complete_todo,
-    };
-    let show_completed = Action {
-        key: "sc".to_string(),
-        text: "show completed todos".to_string(),
-        action: show_completed_todos,
-    };
-    let mut actions: Vec<Action> = vec![insert_action, get_action, complete_action, show_completed];
+    env_logger::init_from_env(Env::default().default_filter_or("info"));
 
-    println!("\nwhat action would you like to take?");
-    println!("\nactions:");
-    for action in &actions {
-        println!("({}):{}", action.key, action.text);
-    }
+    HttpServer::new(move || {
+        let cors = Cors::default()
+            .allowed_origin("http://localhost:8000")
+            .allowed_methods(vec!["GET", "POST", "DELETE", "PATCH"])
+            .allowed_headers(vec![
+                http::header::AUTHORIZATION,
+                http::header::ACCEPT,
+            ])
+            .allowed_header(http::header::CONTENT_TYPE)
+            .max_age(3600);
 
-    let mut action = String::new();
-    let action = read_input(&mut action);
-
-    actions
-        .iter_mut()
-        .find(|x| x.key == action)
-        .unwrap()
-        .do_action(conn);
-}
-
-fn print_todos(conn: &mut PgConnection) {
-    let todos = warehouse::get_todos(conn);
-
-    for todo in todos {
-        println!("{:#?}", todo)
-    }
-}
-
-fn add_todo(conn: &mut PgConnection) {
-    println!("\nwhat would you like the text to be?");
-    let mut text = String::new();
-    let text = read_input(&mut text);
-
-    warehouse::add_todo(conn, &text);
-}
-
-fn complete_todo(conn: &mut PgConnection) {
-    loop {
-        println!("\nWhich todo would you like to complete?");
-
-        let todos = warehouse::get_todos(conn);
-        show_todo_list(&todos);
-
-        let mut text = String::new();
-        let text = read_input(&mut text);
-
-        let Ok(choice) = text.parse::<usize>() else { 
-            println!("You must select a todo from the list.");
-            continue;
-        };
-        
-        let todo_to_complete = &todos[choice - 1];
-
-        let Ok(_) = warehouse::complete_todo(conn, todo_to_complete.id) else {
-            println!("error updating todo");
-            break;
-        };
-
-        println!("success");
-
-        let todos = warehouse::get_todos(conn);
-        show_todo_list(&todos);
-        
-        break;
-
-    }
-}
-
-fn show_todo_list(todos: &Vec<Todo>) {
-    println!("\nTodos:");
-    for (i, todo) in todos.iter().enumerate() {
-        println!("{}: {}", i + 1, todo.text);
-    }
-}
-
-fn show_completed_todos(conn: &mut PgConnection) {
-    let todos = warehouse::get_completed_todos(conn);
-    for todo in todos {
-        println!("{} : {}", todo.text, todo.completed_on)
-    }
-}
-
-fn read_input(input: &mut String) -> &str {
-    stdin().read_line(input).unwrap();
-    return input.trim_end();
+        App::new()
+            .wrap(cors)
+            .wrap(Logger::default())
+            .app_data(app_state.clone())
+            .service(
+                web::scope("/api").configure(todo_controller::configure_scope), // .service(hello)
+            )
+    })
+    .bind(("127.0.0.1", 8080))?
+    .run()
+    .await
 }

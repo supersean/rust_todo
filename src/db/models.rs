@@ -1,21 +1,25 @@
 use crate::db::schema::todos;
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
+use serde::{Deserialize, Serialize};
 
-#[derive(Queryable, Identifiable, Debug)]
+#[derive(Queryable, Identifiable, AsChangeset, Debug, Serialize)]
 pub struct Todo {
     pub id: i32,
     pub text: String,
-    pub completed: bool,
-    pub completed_on: NaiveDateTime,
+    pub completed_on: Option<NaiveDateTime>,
 }
 
-#[derive(Insertable)]
+#[derive(Insertable, Deserialize, AsChangeset, Debug)]
 #[diesel(table_name = todos)]
-pub struct NewTodo<'a> {
-    pub text: &'a str,
+pub struct FormTodo {
+    pub text: Option<String>,
+    pub completed_on: Option<NaiveDateTime>,
 }
 
-pub struct CompleteTodo {
-    pub completed: bool,
+#[derive(Insertable, Deserialize, Debug)]
+#[diesel(table_name = todos)]
+pub struct NewTodo {
+    pub text: String,
 }
+
